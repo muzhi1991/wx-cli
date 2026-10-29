@@ -239,6 +239,7 @@ async fn dispatch(req: Request, db: &DbCache, names: &tokio::sync::RwLock<Arc<Na
                 Err(e) => Response::err(e.to_string()),
             }
         }
+        Groups { query, limit } => Response::ok(query::q_groups(&names_arc, query.as_deref(), limit)),
         Unread {
             limit,
             filter,

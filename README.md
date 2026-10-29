@@ -48,6 +48,8 @@ Linux 读取的是**已 checkpoint 的本地主库**：逐页 HMAC、完整性�
 
 另有 `keys status` / `keys refresh` 用于当前账号的显式密钥维护。
 
+`wx groups [-q 名称或ID] [-n 50] --json` 查询本地通讯录中的群组，包括不在最近会话列表中的群；返回 `groups` 和过滤后的 `total`。使用返回的 `username` 调用 `history` 或 `members` 可避免名称歧义。服务号聚合入口归类为 `folded`，不作为个人会话查询。
+
 ```sh
 wx search '关键词' --in '聊天名称' --json
 wx history '聊天名称' --type video -n 20 --json

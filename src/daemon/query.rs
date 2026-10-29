@@ -29,7 +29,7 @@ pub fn chat_type_of(username: &str, names: &Names) -> &'static str {
     if username.contains("@chatroom") {
         return "group";
     }
-    if username == "brandsessionholder" || username == "@placeholder_foldgroup" {
+    if matches!(username, "brandsessionholder" | "brandservicesessionholder" | "@placeholder_foldgroup") {
         return "folded";
     }
     if names.is_verified(username) {
@@ -755,6 +755,47 @@ pub async fn q_contacts(names: &Names, query: Option<&str>, limit: usize) -> Res
     let total = contacts.len();
     contacts.truncate(limit);
     Ok(json!({ "contacts": contacts, "total": total }))
+}
+
+/// Local contact inventory, including groups absent from the recent session list.
+pub fn q_groups(names: &Names, query: Option<&str>, limit: usize) -> Value {
+    let query = query.map(str::to_lowercase);
+    let mut rows: Vec<_> = names.map.iter()
+        .filter(|(id, _)| chat_type_of(id, names) == "group")
+        .filter(|(id, name)| query.as_ref().is_none_or(|q|
+            id.to_lowercase().contains(q) || name.to_lowercase().contains(q)))
+        .collect();
+    rows.sort_by(|(aid, aname), (bid, bname)| aname.cmp(bname).then(aid.cmp(bid)));
+    let total = rows.len();
+    let groups: Vec<_> = rows.into_iter().take(limit)
+        .map(|(id, name)| json!({"username": id, "display": name, "chat_type": "group"}))
+        .collect();
+    json!({"groups": groups, "total": total})
+}
+
+#[cfg(test)]
+mod groups_tests {
+    use super::*;
+    #[test]
+    fn lists_only_groups_with_stable_order_and_filter_before_limit() {
+        let names = Names {
+            map: [("b@chatroom", "同名"), ("a@chatroom", "同名"),
+                ("c@chatroom", "Example"), ("wxid_friend", "Example"), ("gh_official", "Example")]
+                .into_iter().map(|(a,b)| (a.into(), b.into())).collect(),
+            md5_to_uname: HashMap::new(), msg_db_keys: vec![], biz_msg_db_keys: vec![], verify_flags: HashMap::new(),
+        };
+        let all = q_groups(&names, None, 50);
+        assert_eq!(all["total"], 3);
+        assert_eq!(all["groups"][1]["username"], "a@chatroom");
+        assert_eq!(all["groups"][2]["username"], "b@chatroom");
+        let limited = q_groups(&names, Some("同名"), 1);
+        assert_eq!(limited["total"], 2);
+        assert_eq!(limited["groups"].as_array().unwrap().len(), 1);
+        assert_eq!(q_groups(&names, Some("EXAMPLE"), 50)["total"], 1);
+        assert_eq!(q_groups(&names, Some("b@chatroom"), 50)["groups"][0]["username"], "b@chatroom");
+        assert_eq!(q_groups(&names, None, 0)["groups"], json!([]));
+        assert_eq!(chat_type_of("brandservicesessionholder", &names), "folded");
+    }
 }
 
 // ─── 内部辅助函数 ────────────────────────────────────────────────────────────

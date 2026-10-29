@@ -62,6 +62,12 @@ pub enum Request {
         #[serde(default = "default_limit_50")]
         limit: usize,
     },
+    Groups {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        #[serde(default = "default_limit_50")]
+        limit: usize,
+    },
     Unread {
         #[serde(default = "default_limit_20")]
         limit: usize,
