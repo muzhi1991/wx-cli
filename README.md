@@ -9,7 +9,7 @@
 ```sh
 git clone https://github.com/muzhi1991/wx-cli.git
 cd wx-cli
-git checkout feat/linux-read-parity
+git checkout main
 cargo build --release
 # 可执行文件：target/release/wx
 ```

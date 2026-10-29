@@ -5,7 +5,7 @@ description: "Read local WeChat databases, conversations, contacts and existing 
 
 # wx-cli fork
 
-Build the source from https://github.com/muzhi1991/wx-cli on `feat/linux-read-parity` with `cargo build --release`. The upstream npm package, curl installer and releases do not include this fork. Do not install them to obtain these Linux changes. No release is published by this task.
+Build the source from https://github.com/muzhi1991/wx-cli on `main` with `cargo build --release`. The upstream npm package, curl installer and releases do not include this fork. Do not install them to obtain these Linux changes. No release is published by this task.
 
 Read [README.md](README.md) and [Linux acceptance](docs/linux-read-parity.md) for actual compatibility and missing samples. Verified runtime is Linux x86-64 WeChat 4.1.13.26; other platforms have compilation checks only.
 
