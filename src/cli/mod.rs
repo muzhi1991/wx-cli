@@ -284,9 +284,9 @@ enum Commands {
     Attachments {
         /// 会话名称（联系人显示名 / wxid / @chatroom username 都可以）
         chat: String,
-        /// 类型（默认 image；可重复指定 image/video/file/sticker）
+        /// 类型（默认 image；可重复指定 image/video/file/sticker/voice）
         #[arg(long = "kind", value_name = "KIND",
-              value_parser = ["image", "img", "video", "file", "sticker"])]
+              value_parser = ["image", "img", "video", "file", "sticker", "voice"])]
         kinds: Vec<String>,
         /// 显示数量
         #[arg(short = 'n', long, default_value = "50")]

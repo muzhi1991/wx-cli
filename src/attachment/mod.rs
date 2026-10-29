@@ -22,7 +22,8 @@
 
 pub mod attachment_id;
 pub mod decoder;
-pub mod resolver;
 pub mod image_key;
+pub mod resolver;
+pub mod voice;
 
 pub use attachment_id::{AttachmentId, AttachmentKind};

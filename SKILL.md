@@ -16,7 +16,7 @@ export WX_CLI_HOME=/private/wx-account-a
 wx init --db-dir /path/xwechat_files/account/db_storage --keys-file /private/keys.json
 wx sessions --json
 wx history 'chat' --json
-wx attachments 'chat' --kind image --kind file --kind video --kind sticker --json
+wx attachments 'chat' --kind image --kind file --kind video --kind sticker --kind voice --json
 wx extract '<attachment_id>' -o /private/output --json
 ```
 
@@ -26,4 +26,4 @@ All original 18 commands remain available; discover exact options with `wx --hel
 
 `new-messages --state-file /private/consumer.json` isolates consumers and paginates with a compound cursor. Save/acknowledgment is limited to successful CLI output, not downstream processing. It is a polling query, not a reliable event subscription; do not promise no losses for late/backfilled history.
 
-No sending, automatic replies, UI clicking, control locks, UI-triggered downloads, or automatic CDN fetching belong to this CLI. Missing media must remain a declared state until an independently authorized UI workflow downloads it. The observed encrypted sticker cache and voice extraction are unsupported; do not return a thumbnail as the original video or call WXGF bytes a JPEG/HEVC stream.
+No sending, automatic replies, UI clicking, control locks, UI-triggered downloads, or automatic CDN fetching belong to this CLI. Missing media must remain a declared state until an independently authorized UI workflow downloads it. Voice extraction preserves raw database bytes and the WeChat SILK prefix; `decoded=false` means no audio conversion or transcription. A missing media database key is `key_unavailable`, not a download request. See [local voice](docs/local-voice.md). The observed encrypted sticker cache remains unsupported; do not return a thumbnail as the original video or call WXGF bytes a JPEG/HEVC stream.

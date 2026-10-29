@@ -38,7 +38,7 @@ Linux 读取的是**已 checkpoint 的本地主库**：逐页 HMAC、完整性�
 ```sh
 wx search '关键词' --in '聊天名称' --json
 wx history '聊天名称' --type video -n 20 --json
-wx attachments '聊天名称' --kind image --kind file --kind video --kind sticker --json
+wx attachments '聊天名称' --kind image --kind file --kind video --kind sticker --kind voice --json
 wx extract '<attachment_id>' -o /private/output.png --json
 wx export '聊天名称' --format json -o /private/history.json
 wx new-messages --state-file /private/consumer-a.json -n 200 --json
@@ -47,6 +47,8 @@ wx daemon stop
 ```
 
 `history` 等保留原摘要，同时补充机器可读 `details`。本地图片支持严格 V2 解密及已验证单图 WXGF→PNG；普通文件/视频必须有本地文件并通过消息 MD5 校验。缺失文件返回明确状态；已观察到的加密表情缓存仍不支持解密。`extract` 缺文件时返回 `exported: false`，不会隐式下载。
+
+语音支持从认证的 `media_*.db` 精确关联并导出原始字节，保留微信 SILK 前缀，返回 SHA-256；不转换为 WAV/MP3。新增媒体库缺 key 时明确返回 `key_unavailable`，查询不会自动扫描进程。详见[本地语音导出与真实验收](docs/local-voice.md)。
 
 `new-messages` 修正同秒分页漏读，提供按账号和消费者隔离的复合游标，输出成功后才保存状态。它仍是本地主库轮询，不是可靠事件订阅；迟到历史回补、跨库 checkpoint 和进程崩溃下的重放需要调用方处理。
 

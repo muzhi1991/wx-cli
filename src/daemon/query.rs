@@ -4508,6 +4508,11 @@ pub async fn q_extract(
     let id = AttachmentId::decode(attachment_id)
         .context("解析 attachment_id 失败（不是合法 base64url(json)？）")?;
 
+    if id.kind == crate::attachment::AttachmentKind::Voice {
+        return resolve_voice(db, names, &id)
+            .await?
+            .export(std::path::Path::new(output), overwrite);
+    }
     let local = describe_local_attachment(db, names, &id).await?;
     if local["status"] != "available" {
         return Ok(
@@ -4671,7 +4676,7 @@ pub async fn q_extract(
 }
 
 /// 解析 `kinds` 参数到 `(AttachmentKind, lo32_local_type)` 列表。
-/// 默认 image，同时允许明确选择 video/file/sticker。
+/// 默认 image，同时允许明确选择 video/file/sticker/voice。
 fn parse_attachment_kinds(
     kinds: Option<&[String]>,
 ) -> Result<Vec<(crate::attachment::AttachmentKind, i64)>> {
@@ -4688,8 +4693,11 @@ fn parse_attachment_kinds(
             "video" => (AttachmentKind::Video, 43),
             "file" => (AttachmentKind::File, 49),
             "sticker" => (AttachmentKind::Sticker, 47),
-            "voice" | "audio" => anyhow::bail!("local voice extraction is not verified"),
-            other => anyhow::bail!("未知附件类型：{}（支持 image/video/file/sticker）", other),
+            "voice" => (AttachmentKind::Voice, 34),
+            other => anyhow::bail!(
+                "未知附件类型：{}（支持 image/video/file/sticker/voice）",
+                other
+            ),
         };
         if seen.insert(kind.as_str()) {
             out.push((kind, t));
@@ -5429,6 +5437,9 @@ async fn describe_local_attachment(
     id: &crate::attachment::AttachmentId,
 ) -> Result<Value> {
     use crate::attachment::{resolver, AttachmentKind};
+    if id.kind == AttachmentKind::Voice {
+        return Ok(resolve_voice(db, names, id).await?.metadata);
+    }
     let base = db.db_dir().parent().context("missing account root")?;
     if id.kind == AttachmentKind::Image {
         let Some(resource) = db.get("message/message_resource.db").await? else {
@@ -5579,4 +5590,45 @@ async fn describe_local_attachment(
     Ok(
         json!({"status":if encrypted_cache {"unsupported_local_cache"}else{"needs_download"},"thumbnail_available":thumbnail,"content_md5":digest,"declared_size":declared}),
     )
+}
+
+/// Resolve the message in its own conversation before using any media-local ID.
+async fn resolve_voice(
+    db: &DbCache,
+    names: &Names,
+    id: &crate::attachment::AttachmentId,
+) -> Result<crate::attachment::voice::VoiceLookup> {
+    use crate::attachment::voice::{self, MessageIdentity};
+    let (shards, _) = find_msg_shards(db, names, &id.chat).await?;
+    let mut servers = Vec::new();
+    for shard in shards {
+        let conn =
+            Connection::open_with_flags(shard.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT server_id,local_type FROM [{}] WHERE local_id=?1 AND create_time=?2 LIMIT 2",
+            shard.table
+        ))?;
+        for row in stmt.query_map(rusqlite::params![id.local_id, id.create_time], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })? {
+            let (server, typ) = row?;
+            anyhow::ensure!(
+                (typ as u64 & 0xffffffff) == 34,
+                "attachment kind differs from message"
+            );
+            servers.push(server);
+            anyhow::ensure!(servers.len() <= 1, "voice message identity is ambiguous");
+        }
+    }
+    let server_id = servers.pop().context("voice message identity is missing")?;
+    voice::lookup(
+        db,
+        &MessageIdentity {
+            chat: id.chat.clone(),
+            local_id: id.local_id,
+            server_id,
+            create_time: id.create_time,
+        },
+    )
+    .await
 }
