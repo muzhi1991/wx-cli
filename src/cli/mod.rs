@@ -44,6 +44,12 @@ enum Commands {
         /// 强制重新扫描（覆盖已有配置）
         #[arg(long)]
         force: bool,
+        /// Explicit account db_storage directory
+        #[arg(long)]
+        db_dir: Option<std::path::PathBuf>,
+        /// Existing legacy key map or schema-v1 vault (read and verify; no scan)
+        #[arg(long)]
+        keys_file: Option<std::path::PathBuf>,
     },
     /// 列出最近会话
     Sessions {
@@ -160,6 +166,9 @@ enum Commands {
         /// 显示数量上限
         #[arg(short = 'n', long, default_value = "200")]
         limit: usize,
+        /// Independent consumer cursor file (default is isolated by account)
+        #[arg(long)]
+        state_file: Option<std::path::PathBuf>,
         /// 输出 JSON（默认 YAML）
         #[arg(long)]
         json: bool,
@@ -271,13 +280,13 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// 列出某会话的图片附件，返回不透明 attachment_id
+    /// 列出某会话的本地附件及可用状态，返回不透明 attachment_id
     Attachments {
         /// 会话名称（联系人显示名 / wxid / @chatroom username 都可以）
         chat: String,
-        /// 类型（当前仅支持 image）
+        /// 类型（默认 image；可重复指定 image/video/file/sticker）
         #[arg(long = "kind", value_name = "KIND",
-              value_parser = ["image", "img"])]
+              value_parser = ["image", "img", "video", "file", "sticker"])]
         kinds: Vec<String>,
         /// 显示数量
         #[arg(short = 'n', long, default_value = "50")]
@@ -345,7 +354,11 @@ fn dispatch(cli: Cli) -> Result<()> {
     let base_with_meta = cli.with_meta;
     let base_debug_source = cli.debug_source;
     match cli.command {
-        Commands::Init { force } => init::cmd_init(force),
+        Commands::Init {
+            force,
+            db_dir,
+            keys_file,
+        } => init::cmd_init(force, db_dir, keys_file),
         Commands::Sessions { limit, json } => sessions::cmd_sessions(
             limit,
             OutputOpts {
@@ -434,8 +447,13 @@ fn dispatch(cli: Cli) -> Result<()> {
             },
         ),
         Commands::Members { chat, json } => members::cmd_members(chat, json),
-        Commands::NewMessages { limit, json } => new_messages::cmd_new_messages(
+        Commands::NewMessages {
             limit,
+            json,
+            state_file,
+        } => new_messages::cmd_new_messages(
+            limit,
+            state_file,
             OutputOpts {
                 json,
                 with_meta: base_with_meta,

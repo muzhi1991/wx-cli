@@ -2,6 +2,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MessageCursor {
+    pub timestamp: i64,
+    pub shard: String,
+    pub local_id: i64,
+}
+
 /// CLI 向 daemon 发送的请求（换行符分隔 JSON，与 Python 版兼容）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -76,6 +83,8 @@ pub enum Request {
         state: Option<HashMap<String, i64>>,
         #[serde(default = "default_limit_200")]
         limit: usize,
+        #[serde(default)]
+        cursors: HashMap<String, MessageCursor>,
         #[serde(default, skip_serializing_if = "is_false")]
         with_meta: bool,
         #[serde(default, skip_serializing_if = "is_false")]

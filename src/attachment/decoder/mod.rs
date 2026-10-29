@@ -9,6 +9,8 @@
 //!
 //! 决策点放在 `dispatch`，让上层（`resolver` / CLI extract 命令）只跟一个入口打交道。
 
+pub mod wxgf;
+
 use anyhow::{anyhow, Result};
 
 pub mod v1_xor;
@@ -41,7 +43,10 @@ pub struct V2KeyMaterial<'a> {
 
 impl<'a> V2KeyMaterial<'a> {
     pub fn with_aes(key: &'a [u8; 16]) -> Self {
-        Self { aes_key: Some(key), xor_key: 0x88 }
+        Self {
+            aes_key: Some(key),
+            xor_key: 0x88,
+        }
     }
 }
 
@@ -59,7 +64,10 @@ pub fn dispatch(dat_bytes: &[u8], v2_key: V2KeyMaterial<'_>) -> Result<DecodedIm
             let fixed_key: [u8; 16] = *b"cfcd208495d565ef";
             return v2::decode(
                 dat_bytes,
-                V2KeyMaterial { aes_key: Some(&fixed_key), xor_key: v2_key.xor_key },
+                V2KeyMaterial {
+                    aes_key: Some(&fixed_key),
+                    xor_key: v2_key.xor_key,
+                },
             )
             .map(|mut d| {
                 d.decoder = "v1_aes";
@@ -79,7 +87,7 @@ pub fn dispatch(dat_bytes: &[u8], v2_key: V2KeyMaterial<'_>) -> Result<DecodedIm
 /// 因为 V2 解码后产物可能直接是 wxgf 容器。
 pub fn detect_image_format(bytes: &[u8]) -> &'static str {
     if bytes.len() >= 4 && &bytes[..4] == b"wxgf" {
-        return "hevc";
+        return "wxgf";
     }
     if bytes.len() >= 3 && bytes[..3] == [0xFF, 0xD8, 0xFF] {
         return "jpg";
@@ -116,7 +124,7 @@ mod tests {
         webp.extend_from_slice(&[0; 4]);
         assert_eq!(detect_image_format(&webp), "webp");
         assert_eq!(detect_image_format(&[0x49, 0x49, 0x2A, 0x00]), "tif");
-        assert_eq!(detect_image_format(b"wxgfXXXX"), "hevc");
+        assert_eq!(detect_image_format(b"wxgfXXXX"), "wxgf");
         assert_eq!(detect_image_format(&[0, 0, 0, 0]), "bin");
     }
 }

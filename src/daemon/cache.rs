@@ -91,6 +91,7 @@ impl DbCache {
             inner: Arc::new(Mutex::new(HashMap::new())),
         };
 
+        #[cfg(not(target_os = "linux"))]
         cache.load_persistent().await;
         Ok(cache)
     }
@@ -107,6 +108,7 @@ impl DbCache {
     }
 
     /// 从持久化文件加载 mtime 记录，复用未过期的解密文件
+    #[cfg(not(target_os = "linux"))]
     async fn load_persistent(&self) {
         let mtime_file = &self.mtime_file;
         let content = match tokio::fs::read_to_string(&mtime_file).await {
@@ -200,6 +202,67 @@ impl DbCache {
     }
 
     pub async fn get_with_mode(&self, rel_key: &str) -> Result<Option<CacheResolve>> {
+        #[cfg(target_os = "linux")]
+        {
+            return self.get_checkpoint(rel_key).await;
+        }
+        #[cfg(not(target_os = "linux"))]
+        self.get_legacy(rel_key).await
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn get_checkpoint(&self, rel_key: &str) -> Result<Option<CacheResolve>> {
+        let Some(hex) = self.all_keys.get(rel_key) else {
+            return Ok(None);
+        };
+        let source = self.db_dir.join(rel_key);
+        if !source.exists() {
+            return Ok(None);
+        }
+        // Serialize cache mutations: readers never observe a partially decrypted file.
+        let mut inner = self.inner.lock().await;
+        let stamp = crypto::source_stamp(&std::fs::metadata(&source)?);
+        if let Some(entry) = inner.get(rel_key) {
+            if entry.db_mtime == stamp && entry.decrypted_path.exists() {
+                return Ok(Some(CacheResolve {
+                    path: entry.decrypted_path.clone(),
+                    mode: CacheMode::CacheHit,
+                }));
+            }
+        }
+        let key = hex_to_32bytes(hex)?;
+        let path = self.cache_file_path(rel_key);
+        let destination = path.with_extension("next");
+        let committed = path.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            crypto::full_decrypt(&source, &destination, &key)?;
+            let conn = rusqlite::Connection::open_with_flags(&destination, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            match conn.query_row("PRAGMA integrity_check(1)", [], |row| row.get::<_,String>(0)) {
+                Ok(value) => anyhow::ensure!(value == "ok", "decrypted SQLite integrity check failed"),
+                Err(e) if e.to_string().contains("no such tokenizer: MMFtsTokenizer") => {
+                    eprintln!("[cache] FTS integrity check unavailable: proprietary MMFtsTokenizer; page HMAC verified");
+                }
+                Err(e) => return Err(e.into()),
+            }
+            std::fs::rename(&destination, &committed)?;
+            Ok(())
+        }).await??;
+        inner.insert(
+            rel_key.to_owned(),
+            CacheEntry {
+                db_mtime: stamp,
+                wal_mtime: 0,
+                decrypted_path: path.clone(),
+            },
+        );
+        Ok(Some(CacheResolve {
+            path,
+            mode: CacheMode::FullDecrypt,
+        }))
+    }
+
+    #[allow(dead_code)]
+    async fn get_legacy(&self, rel_key: &str) -> Result<Option<CacheResolve>> {
         let enc_key_hex = match self.all_keys.get(rel_key) {
             Some(k) => k.clone(),
             None => return Ok(None),
@@ -339,8 +402,8 @@ fn wal_path_for(db_path: &Path) -> PathBuf {
     db_path.with_file_name(name)
 }
 
-fn hex_to_32bytes(s: &str) -> Result<[u8; 32]> {
-    if s.len() != 64 {
+pub(crate) fn hex_to_32bytes(s: &str) -> Result<[u8; 32]> {
+    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         anyhow::bail!("密钥 hex 长度应为 64，实际为 {}", s.len());
     }
     let mut out = [0u8; 32];
@@ -351,7 +414,7 @@ fn hex_to_32bytes(s: &str) -> Result<[u8; 32]> {
     Ok(out)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "linux")))]
 mod tests {
     use super::*;
 
@@ -514,20 +577,11 @@ mod tests {
             "rewriting db file should bump mtime"
         );
 
-        // 走 full_decrypt 路径 → fake key 不会让 full_decrypt 失败（它不验证内容），
-        // 但会把 cached file 重写为 PAGE_SZ 倍数。原始内容是 24 bytes，重写后应该 ≥ 4096 bytes。
-        let p = cache
-            .get(&rel_key)
-            .await
-            .unwrap()
-            .expect("cache should produce path");
-        assert_eq!(p, decrypted_path);
-
-        let new_size = std::fs::metadata(&decrypted_path).unwrap().len() as usize;
-        assert!(
-            new_size >= crate::crypto::PAGE_SZ,
-            "expected full_decrypt to rewrite cached file to PAGE_SZ multiple, got size={}",
-            new_size,
+        // Authenticated decrypt must reject fake ciphertext and preserve the old cache.
+        assert!(cache.get(&rel_key).await.is_err());
+        assert_eq!(
+            std::fs::read(&decrypted_path).unwrap(),
+            ORIGINAL_CACHED_BYTES
         );
     }
 
@@ -588,13 +642,11 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&db_path, b"different bytes").unwrap();
-        let full = cache
-            .get_with_mode(&rel_key)
-            .await
-            .unwrap()
-            .expect("db mtime change should trigger full decrypt");
-        assert_eq!(full.path, decrypted_path);
-        assert_eq!(full.mode, CacheMode::FullDecrypt);
+        assert!(cache.get_with_mode(&rel_key).await.is_err());
+        assert_eq!(
+            std::fs::read(&decrypted_path).unwrap(),
+            ORIGINAL_CACHED_BYTES
+        );
     }
 
     #[tokio::test]
@@ -652,5 +704,87 @@ mod tests {
             body, ORIGINAL_CACHED_BYTES,
             "restart + WAL-only change should still reuse cached DB and avoid full_decrypt"
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod checkpoint_tests {
+    use super::*;
+    #[tokio::test]
+    async fn authenticated_cache_hit_source_change_bad_page_and_restart() {
+        let root = std::env::temp_dir().join(format!("wx-checkpoint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("sample.db");
+        let key = [9u8; 32];
+        crate::crypto::encrypted_test_database(
+            &source,
+            "CREATE TABLE samples(value); INSERT INTO samples VALUES(1);",
+            &key,
+        );
+        let keys = HashMap::from([("sample.db".into(), "09".repeat(32))]);
+        let cache = DbCache::with_dirs(
+            root.clone(),
+            root.join("cache"),
+            root.join("mtimes"),
+            keys.clone(),
+        )
+        .await
+        .unwrap();
+        let first = cache.get_with_mode("sample.db").await.unwrap().unwrap();
+        assert_eq!(first.mode, CacheMode::FullDecrypt);
+        assert_eq!(
+            cache
+                .get_with_mode("sample.db")
+                .await
+                .unwrap()
+                .unwrap()
+                .mode,
+            CacheMode::CacheHit
+        );
+        // WAL-only changes are deliberately excluded; visibility is checkpoint-only.
+        std::fs::write(root.join("sample.db-wal"), b"not a valid WAL").unwrap();
+        assert_eq!(
+            cache
+                .get_with_mode("sample.db")
+                .await
+                .unwrap()
+                .unwrap()
+                .mode,
+            CacheMode::CacheHit
+        );
+        crate::crypto::encrypted_test_database(
+            &source,
+            "CREATE TABLE samples(value); INSERT INTO samples VALUES(2);",
+            &key,
+        );
+        assert_eq!(
+            cache
+                .get_with_mode("sample.db")
+                .await
+                .unwrap()
+                .unwrap()
+                .mode,
+            CacheMode::FullDecrypt
+        );
+        let conn = rusqlite::Connection::open(&first.path).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT value FROM samples", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        drop(conn);
+        let saved = std::fs::read(&first.path).unwrap();
+        let mut bad = std::fs::read(&source).unwrap();
+        bad[4200] ^= 1;
+        std::fs::write(&source, &bad).unwrap();
+        assert!(cache.get_with_mode("sample.db").await.is_err());
+        assert_eq!(std::fs::read(&first.path).unwrap(), saved);
+        let restarted =
+            DbCache::with_dirs(root.clone(), root.join("cache"), root.join("mtimes"), keys)
+                .await
+                .unwrap();
+        assert!(restarted.get("sample.db").await.is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

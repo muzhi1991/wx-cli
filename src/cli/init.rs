@@ -5,26 +5,66 @@ use std::collections::HashMap;
 use crate::config;
 use crate::scanner;
 
-pub fn cmd_init(force: bool) -> Result<()> {
+pub fn cmd_init(
+    force: bool,
+    explicit_db: Option<std::path::PathBuf>,
+    existing_keys: Option<std::path::PathBuf>,
+) -> Result<()> {
     // 查找 config.json
     let config_path = find_or_create_config_path();
+
+    if let Some(keys_file) = existing_keys {
+        let db_dir = explicit_db
+            .or_else(config::auto_detect_db_dir)
+            .context("specify --db-dir for the existing vault")?;
+        let db_dir = std::fs::canonicalize(db_dir)?;
+        let keys_file = std::fs::canonicalize(keys_file)?;
+        let raw = serde_json::from_slice(&std::fs::read(&keys_file)?)?;
+        let keys = crate::daemon::load_keys(&raw, &db_dir)?;
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec_pretty(&json!({
+                "db_dir": db_dir, "keys_file": keys_file, "decrypted_dir": config::cache_dir()
+            }))?,
+        )?;
+        let _ = crate::cli::transport::stop_daemon();
+        println!(
+            "Initialized with {} authenticated cached keys; process memory read: 0 bytes",
+            keys.len()
+        );
+        return Ok(());
+    }
 
     // 检查是否已初始化
     if !force && config_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&config_path) {
             if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&content) {
                 let db_dir = cfg.get("db_dir").and_then(|v| v.as_str()).unwrap_or("");
-                let keys_file = cfg.get("keys_file").and_then(|v| v.as_str()).unwrap_or("all_keys.json");
+                let keys_file = cfg
+                    .get("keys_file")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("all_keys.json");
                 let keys_path = if std::path::Path::new(keys_file).is_absolute() {
                     std::path::PathBuf::from(keys_file)
                 } else {
-                    config_path.parent().unwrap_or(std::path::Path::new("."))
+                    config_path
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."))
                         .join(keys_file)
                 };
-                if !db_dir.is_empty() && !db_dir.contains("your_wxid")
+                if !db_dir.is_empty()
+                    && !db_dir.contains("your_wxid")
                     && std::path::Path::new(db_dir).exists()
                     && keys_path.exists()
                 {
+                    if let Some(requested) = explicit_db.as_ref() {
+                        ensure_same_account(requested, std::path::Path::new(db_dir))?;
+                    }
+                    let raw = serde_json::from_slice(&std::fs::read(&keys_path)?)?;
+                    crate::daemon::load_keys(&raw, std::path::Path::new(db_dir))?;
                     println!("已初始化，数据目录: {}", db_dir);
                     println!("如需重新扫描密钥，使用 --force");
                     return Ok(());
@@ -35,7 +75,7 @@ pub fn cmd_init(force: bool) -> Result<()> {
 
     // Step 1: 检测 db_dir
     println!("检测微信数据目录...");
-    let db_dir = config::auto_detect_db_dir().with_context(|| format!(
+    let db_dir = explicit_db.or_else(config::auto_detect_db_dir).with_context(|| format!(
         "未能自动检测到微信数据目录\n\
          请编辑配置文件并填写 db_dir 字段:\n  \
          {}\n\
@@ -62,18 +102,40 @@ pub fn cmd_init(force: bool) -> Result<()> {
     }
 
     // Step 3: 保存 all_keys.json
-    let keys_file_path = config_path.parent()
+    let keys_file_path = config_path
+        .parent()
         .unwrap_or(std::path::Path::new("."))
         .join("all_keys.json");
 
     let mut keys_json = serde_json::Map::new();
     for entry in &entries {
-        keys_json.insert(entry.db_name.clone(), json!({
-            "enc_key": entry.enc_key,
-        }));
+        keys_json.insert(
+            entry.db_name.clone(),
+            json!({
+                "enc_key": entry.enc_key,
+            }),
+        );
     }
-    std::fs::write(&keys_file_path, serde_json::to_string_pretty(&keys_json)?)
-        .context("写入 all_keys.json 失败")?;
+    // Preserve independently authenticated entries from the existing configuration.
+    if let Ok(old) = config::load_config() {
+        if old.db_dir == db_dir {
+            if let Ok(bytes) = std::fs::read(old.keys_file) {
+                if let Ok(raw) = serde_json::from_slice(&bytes) {
+                    if let Ok(previous) = crate::daemon::load_keys(&raw, &db_dir) {
+                        for (name, key) in previous {
+                            keys_json
+                                .entry(name)
+                                .or_insert_with(|| json!({"enc_key":key}));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let temporary = keys_file_path.with_extension("partial");
+    std::fs::write(&temporary, serde_json::to_string_pretty(&keys_json)?)?;
+    std::fs::File::open(&temporary)?.sync_all()?;
+    std::fs::rename(&temporary, &keys_file_path).context("写入 all_keys.json 失败")?;
     println!("成功提取 {} 个数据库密钥", entries.len());
     println!("密钥已保存: {}", keys_file_path.display());
 
@@ -90,8 +152,9 @@ pub fn cmd_init(force: bool) -> Result<()> {
         }
     }
     cfg.insert("db_dir".into(), json!(db_dir.to_string_lossy()));
-    cfg.entry("keys_file".into()).or_insert_with(|| json!("all_keys.json"));
-    cfg.entry("decrypted_dir".into()).or_insert_with(|| json!("decrypted"));
+    cfg.insert("keys_file".into(), json!("all_keys.json"));
+    cfg.entry("decrypted_dir".into())
+        .or_insert_with(|| json!("decrypted"));
 
     std::fs::write(&config_path, serde_json::to_string_pretty(&cfg)?)
         .context("写入 config.json 失败")?;
@@ -151,7 +214,9 @@ fn drop_privileges_if_sudo() -> Result<()> {
     }
 
     // 设置 umask，让后续 create 出来的文件/目录默认是 0600 / 0700。
-    unsafe { libc::umask(0o077); }
+    unsafe {
+        libc::umask(0o077);
+    }
 
     // 必须先 setgid 再 setuid：一旦 uid 降下来就没法再改 gid 了。
     unsafe {
@@ -175,8 +240,9 @@ fn drop_privileges_if_sudo() -> Result<()> {
         Ok(())
     }
     fn chown_one(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
-        let c = CString::new(path.as_os_str().as_bytes())
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL"))?;
+        let c = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL")
+        })?;
         if unsafe { libc::chown(c.as_ptr(), uid, gid) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -201,6 +267,9 @@ fn drop_privileges_if_sudo() -> Result<()> {
 }
 
 fn find_or_create_config_path() -> std::path::PathBuf {
+    if std::env::var_os("WX_CLI_HOME").is_some() {
+        return config::cli_dir().join("config.json");
+    }
     // 如果当前工作目录或可执行文件目录已有 config.json，沿用它（支持便携模式）
     if let Ok(cwd) = std::env::current_dir() {
         let p = cwd.join("config.json");
@@ -218,4 +287,22 @@ fn find_or_create_config_path() -> std::path::PathBuf {
     }
     // 默认写入 ~/.wx-cli/config.json（与 load_config 的最终查找路径保持一致）
     config::cli_dir().join("config.json")
+}
+
+fn ensure_same_account(requested: &std::path::Path, configured: &std::path::Path) -> Result<()> {
+    anyhow::ensure!(std::fs::canonicalize(requested)? == std::fs::canonicalize(configured)?,
+        "--db-dir differs from configured account; use a separate WX_CLI_HOME and --keys-file, or explicit --force");
+    Ok(())
+}
+#[cfg(test)]
+mod account_tests {
+    #[test]
+    fn explicit_account_mismatch_is_rejected() {
+        let root = std::env::temp_dir().join(format!("wx-init-account-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        assert!(super::ensure_same_account(&root.join("a"), &root.join("a/.")).is_ok());
+        assert!(super::ensure_same_account(&root.join("a"), &root.join("b")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

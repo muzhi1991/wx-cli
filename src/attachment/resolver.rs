@@ -69,40 +69,23 @@ pub fn lookup_md5_blocking(
         return Ok(None);
     };
 
-    // 2) MessageResourceInfo:
-    //    同 chat 内 local_id 会复用，所以先用 create_time 精确命中；
-    //    若资源库里的时间戳跟 message_N.db 不完全对齐，再 fallback 到“同 local_id/type 取最新”
-    //    message_local_type 高 32 bit 是版本/会话 flag，低 32 bit 才是真实类型
-    let packed_exact: Option<Vec<u8>> = conn
-        .query_row(
-            "SELECT packed_info FROM MessageResourceInfo
-             WHERE chat_id = ?1
-               AND message_local_id = ?2
-               AND (message_local_type = ?3 OR message_local_type % 4294967296 = ?3)
-               AND message_create_time = ?4
-             ORDER BY rowid DESC
-             LIMIT 1",
+    // Require one exact message resource. A reused local_id is not a fallback.
+    let mut statement = conn.prepare(
+        "SELECT packed_info FROM MessageResourceInfo
+        WHERE chat_id=?1 AND message_local_id=?2
+        AND (message_local_type & 4294967295)=?3 AND message_create_time=?4 LIMIT 2",
+    )?;
+    let rows: Vec<Vec<u8>> = statement
+        .query_map(
             rusqlite::params![chat_id, local_id, msg_local_type_lo32, create_time],
             |row| row.get(0),
-        )
-        .ok();
-
-    let packed: Option<Vec<u8>> = packed_exact.or_else(|| conn
-        .query_row(
-            "SELECT packed_info FROM MessageResourceInfo
-             WHERE chat_id = ?1
-               AND message_local_id = ?2
-               AND (message_local_type = ?3 OR message_local_type % 4294967296 = ?3)
-             ORDER BY message_create_time DESC
-             LIMIT 1",
-            rusqlite::params![chat_id, local_id, msg_local_type_lo32],
-            |row| row.get(0),
-        )
-        .ok());
-
-    let Some(blob) = packed else {
+        )?
+        .collect::<rusqlite::Result<_>>()?;
+    anyhow::ensure!(rows.len() <= 1, "ambiguous exact attachment resource");
+    let Some(blob) = rows.into_iter().next() else {
         return Ok(None);
     };
+
     Ok(extract_md5_from_packed_info(&blob).map(|md5| AttachmentMetadata { md5 }))
 }
 
@@ -110,7 +93,7 @@ pub fn lookup_md5_blocking(
 ///
 /// 主路径：搜 4 字节 marker `12 22 0a 20`（field=2 LEN, length=34, sub field=1 LEN, length=32），
 /// 紧跟 32 字节 ASCII hex。
-/// Fallback：扫整个 blob 找连续 32 字节合法 hex 字符。
+/// Unmarked hex strings are intentionally not interpreted as resource identifiers.
 pub fn extract_md5_from_packed_info(blob: &[u8]) -> Option<String> {
     const MARKER: &[u8; 4] = &[0x12, 0x22, 0x0A, 0x20];
 
@@ -126,17 +109,6 @@ pub fn extract_md5_from_packed_info(blob: &[u8]) -> Option<String> {
         }
     }
 
-    // Fallback：连续 32 字节合法 hex
-    if blob.len() >= 32 {
-        for start in 0..=blob.len() - 32 {
-            let chunk = &blob[start..start + 32];
-            if let Ok(s) = std::str::from_utf8(chunk) {
-                if s.chars().all(|c| c.is_ascii_hexdigit()) {
-                    return Some(s.to_ascii_lowercase());
-                }
-            }
-        }
-    }
     None
 }
 
@@ -145,9 +117,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || needle.len() > haystack.len() {
         return None;
     }
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// 在 `<attach_root>/<md5(chat)>/<YYYY-MM>/Img/<md5>[_t|_h].dat` 下找文件。
@@ -209,6 +179,10 @@ fn pick_best_in_img_dir(img_dir: &Path, file_md5: &str) -> Option<PathBuf> {
     if hd.is_file() {
         return Some(hd);
     }
+    let bubble = img_dir.join(format!("{}_b.dat", file_md5));
+    if bubble.is_file() {
+        return Some(bubble);
+    }
     let thumb = img_dir.join(format!("{}_t.dat", file_md5));
     if thumb.is_file() {
         return Some(thumb);
@@ -250,6 +224,7 @@ pub fn resolve_blocking(
         super::AttachmentKind::Voice => 34,
         super::AttachmentKind::Video => 43,
         super::AttachmentKind::File => 49,
+        super::AttachmentKind::Sticker => 47,
     };
 
     let meta = lookup_md5_blocking(
@@ -280,7 +255,12 @@ pub fn resolve_blocking(
     )?;
     let size = std::fs::metadata(&dat_path).map(|m| m.len()).unwrap_or(0);
 
-    Ok(ResolvedAttachment { id: id.clone(), md5: meta.md5, dat_path, size })
+    Ok(ResolvedAttachment {
+        id: id.clone(),
+        md5: meta.md5,
+        dat_path,
+        size,
+    })
 }
 
 #[cfg(test)]
@@ -306,10 +286,7 @@ mod tests {
         let mut blob = vec![0xFF, 0x00];
         blob.extend_from_slice(b"00112233445566778899aabbccddeeff");
         blob.extend_from_slice(&[0x01]);
-        assert_eq!(
-            extract_md5_from_packed_info(&blob),
-            Some("00112233445566778899aabbccddeeff".to_string())
-        );
+        assert_eq!(extract_md5_from_packed_info(&blob), None);
     }
 
     #[test]
@@ -334,11 +311,8 @@ mod tests {
         let dir = tempdir_for_test();
         let db_path = dir.join("message_resource.db");
         let conn = Connection::open(&db_path).unwrap();
-        conn.execute(
-            "CREATE TABLE ChatName2Id (user_name TEXT)",
-            [],
-        )
-        .unwrap();
+        conn.execute("CREATE TABLE ChatName2Id (user_name TEXT)", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO ChatName2Id (rowid, user_name) VALUES (1, 'room@chatroom')",
             [],
@@ -415,13 +389,19 @@ mod tests {
         std::fs::write(img.join(format!("{}_h.dat", md5)), b"hd").unwrap();
         // 只有 _t / _h 时取 _h
         assert_eq!(
-            pick_best_in_img_dir(&img, md5).unwrap().file_name().unwrap(),
+            pick_best_in_img_dir(&img, md5)
+                .unwrap()
+                .file_name()
+                .unwrap(),
             format!("{}_h.dat", md5).as_str()
         );
         // 加 full 后取 full
         std::fs::write(img.join(format!("{}.dat", md5)), b"full").unwrap();
         assert_eq!(
-            pick_best_in_img_dir(&img, md5).unwrap().file_name().unwrap(),
+            pick_best_in_img_dir(&img, md5)
+                .unwrap()
+                .file_name()
+                .unwrap(),
             format!("{}.dat", md5).as_str()
         );
     }
