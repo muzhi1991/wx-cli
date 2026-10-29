@@ -68,7 +68,7 @@ pub fn warning_lines(data: &serde_json::Value) -> Vec<String> {
 
     if !unknown_shards.is_empty() {
         lines.push(format!(
-            "磁盘上发现 daemon 不认识的分片 {}，结果可能不完整；运行 `wx init --force` 重新提取密钥。",
+            "磁盘上发现 daemon 不认识的分片 {}，结果可能不完整；先运行 `wx keys status` 检查密钥，必要时运行 `wx keys refresh` 增量更新。",
             unknown_shards.join(", ")
         ));
     }

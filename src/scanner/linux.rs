@@ -77,6 +77,40 @@ fn decode_literal(encoded: &[u8]) -> Option<([u8; 32], String)> {
     result
 }
 pub fn scan_keys(db_dir: &Path) -> Result<Vec<KeyEntry>> {
+    scan_with_databases(db_dir, collect_db_salts(db_dir))
+}
+pub fn scan_keys_for_databases(db_dir: &Path, targets: &[String]) -> Result<Vec<KeyEntry>> {
+    let root = fs::canonicalize(db_dir)?;
+    scan_with_databases(&root, target_databases(&root, targets)?)
+}
+fn target_databases(root: &Path, targets: &[String]) -> Result<Vec<(String, String)>> {
+    let mut databases = Vec::new();
+    for target in targets {
+        ensure!(
+            !target.contains('\\')
+                && !target.contains(':')
+                && target.ends_with(".db")
+                && target
+                    .split('/')
+                    .all(|part| !part.is_empty() && part != "." && part != ".."),
+            "invalid scan target path"
+        );
+        let path = root.join(target);
+        ensure!(
+            fs::canonicalize(&path)? == path && fs::symlink_metadata(&path)?.file_type().is_file(),
+            "unsafe scan target path"
+        );
+        let salt = super::read_db_salt(&path).context("cannot read encrypted scan target")?;
+        ensure!(
+            !databases.iter().any(|(_, name)| name == target),
+            "duplicate scan target"
+        );
+        databases.push((salt, target.clone()));
+    }
+    Ok(databases)
+}
+fn scan_with_databases(db_dir: &Path, databases: Vec<(String, String)>) -> Result<Vec<KeyEntry>> {
+    ensure!(!databases.is_empty(), "no encrypted databases found");
     let pid = find_pid()?;
     let expected = identity(pid)?;
     if let Ok(start) = std::env::var("WX_WECHAT_STARTTIME") {
@@ -172,8 +206,6 @@ pub fn scan_keys(db_dir: &Path) -> Result<Vec<KeyEntry>> {
         read(base + MASK_VA, 32)? == MASK,
         "runtime profile mismatch"
     );
-    let databases = collect_db_salts(db_dir);
-    ensure!(!databases.is_empty(), "no encrypted databases found");
     let mut found = HashMap::new();
     let mut objects = 0;
     'regions: for &(lo, hi) in &regions {
@@ -252,6 +284,25 @@ pub fn scan_keys(db_dir: &Path) -> Result<Vec<KeyEntry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn target_inventory_is_exact_and_rejects_path_escape() {
+        let root = std::env::temp_dir().join(format!("wx-targets-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        for name in ["a.db", "b.db"] {
+            crate::crypto::encrypted_test_database(
+                &root.join(name),
+                "CREATE TABLE t(x INTEGER);",
+                &[7; 32],
+            );
+        }
+        let root = fs::canonicalize(root).unwrap();
+        let list = target_databases(&root, &["b.db".into()]).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].1, "b.db");
+        assert!(target_databases(&root, &["../a.db".into()]).is_err());
+        assert!(target_databases(&root, &["b.db".into(), "b.db".into()]).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn decodes_only_exact_raw_key_literal() {
         let raw = format!("x'{}{}'", "12".repeat(32), "34".repeat(16));

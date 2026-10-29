@@ -7,6 +7,7 @@ pub mod extract;
 pub mod favorites;
 pub mod history;
 mod init;
+mod keys;
 pub mod members;
 pub mod new_messages;
 pub mod output;
@@ -39,6 +40,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// 检查或增量更新当前账号的数据库密钥
+    Keys {
+        #[command(subcommand)]
+        action: KeyCommands,
+    },
     /// 初始化：检测数据目录并扫描加密密钥
     Init {
         /// 强制重新扫描（覆盖已有配置）
@@ -342,6 +348,22 @@ pub enum DaemonCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum KeyCommands {
+    /// 验证本地数据库与缓存密钥（不扫描进程）
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// 只为缺失或失效的目标更新密钥（Linux 有界扫描）
+    Refresh {
+        #[arg(long)]
+        database: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 pub fn run() {
     let cli = Cli::parse();
     if let Err(e) = dispatch(cli) {
@@ -354,6 +376,10 @@ fn dispatch(cli: Cli) -> Result<()> {
     let base_with_meta = cli.with_meta;
     let base_debug_source = cli.debug_source;
     match cli.command {
+        Commands::Keys { action } => match action {
+            KeyCommands::Status { json } => keys::status(json),
+            KeyCommands::Refresh { database, json } => keys::refresh(database, json),
+        },
         Commands::Init {
             force,
             db_dir,

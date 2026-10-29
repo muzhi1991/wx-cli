@@ -29,11 +29,24 @@ export WX_CLI_HOME="$HOME/.wx-cli-account-a"
 
 支持原版 key map 和 schema-v1 vault。导入时验证每库 salt 与首页 HMAC；之后查询不扫描进程、不改传入 vault。首次取钥才使用受 ELF 版本、进程身份、账号和字节/时间上限约束的 Linux scanner；详见[配置与权限](docs/linux-read-parity.md#setup-and-secrets)。不同账号使用独立 `WX_CLI_HOME`，明文缓存与导出文件也应放在私有目录。
 
+新增数据库或密钥失效时，使用独立的 `keys` 维护命令：
+
+```sh
+wx keys status --json
+wx keys refresh --database message/media_0.db --json
+# 不指定 --database 时，只补齐当前缺失或失效的库
+wx keys refresh --json
+```
+
+`status` 只读本地数据库首页并验证 HMAC；`refresh` 对有效目标直接返回，不扫描进程。需要补钥时，仅 Linux 已验证版本支持一次有界扫描，全部目标认证成功后才备份并原子更新当前配置的密钥文件，保留原格式、未知字段和 Unix 属主，随后停止当前 wx daemon 以便下次查询重载。查询不会自动补钥。详见[密钥维护与验收](docs/key-maintenance.md)。
+
 Linux 读取的是**已 checkpoint 的本地主库**：逐页 HMAC、完整性检查、文件身份校验；不应用旧版不可靠 WAL。输出中的 `wal_applied=false` 与 `freshness=checkpoint_only` 表示新消息可能尚未可见，不保证约一分钟或任何固定延迟。
 
 ## 命令
 
 原有命令继续保留：`init`、`sessions`、`unread`、`history`、`search`、`new-messages`、`contacts`、`members`、`stats`、`favorites`、`sns-notifications`、`sns-feed`、`sns-search`、`biz-articles`、`attachments`、`extract`、`export`、`daemon`。每个命令的参数见 `wx <command> --help`；多数查询支持 `--json`，默认 YAML。
+
+另有 `keys status` / `keys refresh` 用于当前账号的显式密钥维护。
 
 ```sh
 wx search '关键词' --in '聊天名称' --json
