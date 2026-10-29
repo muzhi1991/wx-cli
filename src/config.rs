@@ -68,6 +68,9 @@ pub fn load_config() -> Result<Config> {
 }
 
 fn find_config_file() -> Result<PathBuf> {
+    if std::env::var_os("WX_CLI_HOME").is_some() {
+        return Ok(cli_dir().join("config.json"));
+    }
     let cwd_dir = std::env::current_dir().ok();
     let exe_dir = std::env::current_exe()
         .ok()
@@ -121,7 +124,9 @@ fn home_config_path(home_dir: &Path) -> PathBuf {
 }
 
 pub fn cli_dir() -> PathBuf {
-    cli_home_dir().join(".wx-cli")
+    std::env::var_os("WX_CLI_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cli_home_dir().join(".wx-cli"))
 }
 
 fn cli_home_dir() -> PathBuf {
@@ -260,13 +265,17 @@ fn detect_db_dir_impl() -> Option<PathBuf> {
 
     let mut candidates: Vec<PathBuf> = Vec::new();
     for base_home in [Some(home.clone()), sudo_home].into_iter().flatten() {
-        let xwechat = base_home.join("Documents/xwechat_files");
-        if xwechat.exists() {
-            if let Ok(entries) = std::fs::read_dir(&xwechat) {
-                for entry in entries.flatten() {
-                    let storage = entry.path().join("db_storage");
-                    if storage.is_dir() {
-                        candidates.push(storage);
+        for xwechat in [
+            base_home.join("Documents/xwechat_files"),
+            base_home.join("xwechat_files"),
+        ] {
+            if xwechat.exists() {
+                if let Ok(entries) = std::fs::read_dir(&xwechat) {
+                    for entry in entries.flatten() {
+                        let storage = entry.path().join("db_storage");
+                        if storage.is_dir() {
+                            candidates.push(storage);
+                        }
                     }
                 }
             }
@@ -361,9 +370,7 @@ fn detect_db_dir_impl() -> Option<PathBuf> {
 fn resolve_windows_data_root(content: &str) -> Option<PathBuf> {
     let trimmed = content.trim();
     // Strip an optional trailing slash so `MyDocument:\` and `MyDocument:/` also match.
-    let stripped = trimmed
-        .strip_suffix(['\\', '/'])
-        .unwrap_or(trimmed);
+    let stripped = trimmed.strip_suffix(['\\', '/']).unwrap_or(trimmed);
     if stripped.eq_ignore_ascii_case("MyDocument:") {
         return known_documents_dir();
     }
@@ -376,9 +383,7 @@ fn known_documents_dir() -> Option<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::Com::CoTaskMemFree;
-    use windows::Win32::UI::Shell::{
-        FOLDERID_Documents, SHGetKnownFolderPath, KF_FLAG_DEFAULT,
-    };
+    use windows::Win32::UI::Shell::{FOLDERID_Documents, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
 
     // SAFETY: standard Win32 known-folder API. SHGetKnownFolderPath either returns
     // a heap-allocated PWSTR that the caller must free with CoTaskMemFree, or an
@@ -493,7 +498,12 @@ mod tests {
         // Should match the keyword exactly (case-insensitive, with or without trailing slash)
         // and resolve to a non-empty Documents path via SHGetKnownFolderPath.
         let docs = known_documents_dir().expect("Documents known folder must resolve");
-        for keyword in ["MyDocument:", "mydocument:", "MyDocument:\\", "MyDocument:/"] {
+        for keyword in [
+            "MyDocument:",
+            "mydocument:",
+            "MyDocument:\\",
+            "MyDocument:/",
+        ] {
             let resolved = resolve_windows_data_root(keyword)
                 .unwrap_or_else(|| panic!("keyword {keyword:?} should resolve"));
             assert_eq!(resolved, docs, "keyword {keyword:?}");

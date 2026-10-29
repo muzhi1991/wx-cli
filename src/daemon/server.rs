@@ -72,7 +72,18 @@ async fn handle_connection_unix(
         }
     };
 
-    let resp = dispatch(req, &db, &names).await;
+    #[allow(unused_mut)]
+    let mut resp = dispatch(req, &db, &names).await;
+    #[cfg(target_os = "linux")]
+    if let Some(data) = resp.data.as_object_mut() {
+        data.insert(
+            "snapshot".into(),
+            serde_json::json!({
+                "mode": "authenticated_checkpoint", "wal_applied": false,
+                "freshness": "checkpoint_only", "cross_database_atomic": false
+            }),
+        );
+    }
     writer.write_all(resp.to_json_line()?.as_bytes()).await?;
     Ok(())
 }
@@ -128,7 +139,18 @@ async fn handle_connection_windows(
         }
     };
 
-    let resp = dispatch(req, &db, &names).await;
+    #[allow(unused_mut)]
+    let mut resp = dispatch(req, &db, &names).await;
+    #[cfg(target_os = "linux")]
+    if let Some(data) = resp.data.as_object_mut() {
+        data.insert(
+            "snapshot".into(),
+            serde_json::json!({
+                "mode": "authenticated_checkpoint", "wal_applied": false,
+                "freshness": "checkpoint_only", "cross_database_atomic": false
+            }),
+        );
+    }
     writer.write_all(resp.to_json_line()?.as_bytes()).await?;
     Ok(())
 }
@@ -232,11 +254,21 @@ async fn dispatch(req: Request, db: &DbCache, names: &tokio::sync::RwLock<Arc<Na
         },
         NewMessages {
             state,
+            cursors,
             limit,
             with_meta,
             debug_source,
         } => {
-            match query::q_new_messages(db, &names_arc, state, limit, with_meta, debug_source).await
+            match query::q_new_messages(
+                db,
+                &names_arc,
+                state,
+                cursors,
+                limit,
+                with_meta,
+                debug_source,
+            )
+            .await
             {
                 Ok(v) => Response::ok(v),
                 Err(e) => Response::err(e.to_string()),

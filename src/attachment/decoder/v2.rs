@@ -10,8 +10,6 @@
 //! 16 的倍数时，PKCS7 还会再加一整块 padding，所以再 +16。等价于
 //! `aes_size + (16 - aes_size % 16)`。
 //!
-//! ⚠️ 此模块由 codex 落地完整 V2 实现 + image key 模块。当前只提供一个
-//! `decode` 入口骨架，方便 v1_aes 路径（固定 key）和 dispatch 一起编译过。
 //! `aes_key=None` 时返回带具体诊断信息的错误。
 
 use anyhow::{anyhow, bail, Result};
@@ -22,16 +20,20 @@ const HEADER_SIZE: usize = 15;
 
 pub fn decode(file_bytes: &[u8], key: V2KeyMaterial<'_>) -> Result<DecodedImage> {
     if file_bytes.len() < HEADER_SIZE {
-        bail!("V2 .dat: 文件过短（{} < {} 字节）", file_bytes.len(), HEADER_SIZE);
+        bail!(
+            "V2 .dat: 文件过短（{} < {} 字节）",
+            file_bytes.len(),
+            HEADER_SIZE
+        );
     }
     let magic: &[u8; 6] = file_bytes[..6].try_into().unwrap();
     if magic != &V2_MAGIC && magic != &V1_MAGIC {
         bail!("V2 .dat: header magic 不匹配 V1/V2");
     }
 
-    let aes_key = key.aes_key.ok_or_else(|| {
-        anyhow!("V2 .dat: 需要 image AES key（codex 的 image_key 模块尚未填充）")
-    })?;
+    let aes_key = key
+        .aes_key
+        .ok_or_else(|| anyhow!("V2 .dat: 需要经过本地数据验证的 image AES key"))?;
 
     let aes_size = u32::from_le_bytes(file_bytes[6..10].try_into().unwrap()) as usize;
     let xor_size = u32::from_le_bytes(file_bytes[10..14].try_into().unwrap()) as usize;
@@ -39,7 +41,9 @@ pub fn decode(file_bytes: &[u8], key: V2KeyMaterial<'_>) -> Result<DecodedImage>
     // PKCS7 对齐：aes_size 不是 16 的倍数 → 向上对齐；是 16 的倍数 → 再加一整块
     let aligned_aes_size = aes_size + (16 - (aes_size % 16));
 
-    let aes_end = HEADER_SIZE.checked_add(aligned_aes_size).ok_or_else(|| anyhow!("aes 段长度溢出"))?;
+    let aes_end = HEADER_SIZE
+        .checked_add(aligned_aes_size)
+        .ok_or_else(|| anyhow!("aes 段长度溢出"))?;
     if aes_end > file_bytes.len() {
         bail!(
             "V2 .dat: 头部宣称 aes_size={} (aligned={}) 超过文件长度 {}",
@@ -49,7 +53,11 @@ pub fn decode(file_bytes: &[u8], key: V2KeyMaterial<'_>) -> Result<DecodedImage>
         );
     }
     let raw_end = file_bytes.len().checked_sub(xor_size).ok_or_else(|| {
-        anyhow!("V2 .dat: 头部宣称 xor_size={} 超过文件长度 {}", xor_size, file_bytes.len())
+        anyhow!(
+            "V2 .dat: 头部宣称 xor_size={} 超过文件长度 {}",
+            xor_size,
+            file_bytes.len()
+        )
     })?;
     if aes_end > raw_end {
         bail!(
@@ -62,12 +70,18 @@ pub fn decode(file_bytes: &[u8], key: V2KeyMaterial<'_>) -> Result<DecodedImage>
     // === AES-128-ECB 解密 + PKCS7 unpad ===
     let aes_data = &file_bytes[HEADER_SIZE..aes_end];
     let dec_aes = aes_ecb_decrypt_pkcs7(aes_key, aes_data)?;
+    if dec_aes.len() != aes_size {
+        bail!("V2 AES plaintext length differs from header");
+    }
 
     // === Raw 段（未加密） ===
     let raw_data = &file_bytes[aes_end..raw_end];
 
     // === XOR 段 ===
-    let xor_data: Vec<u8> = file_bytes[raw_end..].iter().map(|b| b ^ key.xor_key).collect();
+    let xor_data: Vec<u8> = file_bytes[raw_end..]
+        .iter()
+        .map(|b| b ^ key.xor_key)
+        .collect();
 
     let mut out = Vec::with_capacity(dec_aes.len() + raw_data.len() + xor_data.len());
     out.extend_from_slice(&dec_aes);
@@ -78,7 +92,11 @@ pub fn decode(file_bytes: &[u8], key: V2KeyMaterial<'_>) -> Result<DecodedImage>
     if format == "bin" {
         bail!("V2 .dat: AES 解密成功但产物 magic 不识别（key 可能错）");
     }
-    Ok(DecodedImage { data: out, format, decoder: "v2" })
+    Ok(DecodedImage {
+        data: out,
+        format,
+        decoder: "v2",
+    })
 }
 
 /// AES-128-ECB 解密 + PKCS7 unpad。失败时返回 `Err`，不返回半结果。
@@ -126,5 +144,49 @@ mod tests {
         let r = decode(&buf, V2KeyMaterial::default());
         let err = r.unwrap_err().to_string();
         assert!(err.contains("AES key"), "{}", err);
+    }
+    fn fixture(aes_plain: &[u8], raw: &[u8], xor: &[u8]) -> Vec<u8> {
+        use aes::cipher::{BlockEncrypt, KeyInit};
+        let mut padded = aes_plain.to_vec();
+        let padding = 16 - padded.len() % 16;
+        padded.extend(std::iter::repeat_n(padding as u8, padding));
+        let aes = aes::Aes128::new((&[7u8; 16]).into());
+        for chunk in padded.chunks_exact_mut(16) {
+            aes.encrypt_block(chunk.into());
+        }
+        let mut out = V2_MAGIC.to_vec();
+        out.extend((aes_plain.len() as u32).to_le_bytes());
+        out.extend((xor.len() as u32).to_le_bytes());
+        out.push(0);
+        out.extend(padded);
+        out.extend(raw);
+        out.extend(xor.iter().map(|b| b ^ 0x42));
+        out
+    }
+
+    #[test]
+    fn strict_segments_and_aligned_padding() {
+        let key = [7u8; 16];
+        let material = V2KeyMaterial {
+            aes_key: Some(&key),
+            xor_key: 0x42,
+        };
+        for size in [8, 16, 17] {
+            let mut plain = b"\x89PNG\r\n\x1a\n".to_vec();
+            plain.resize(size, 1);
+            let file = fixture(&plain, b"raw", b"tail");
+            let decoded = decode(&file, material).unwrap();
+            plain.extend(b"rawtail");
+            assert_eq!(decoded.data, plain);
+            let mut wrong_length = file.clone();
+            wrong_length[6..10].copy_from_slice(&((size + 1) as u32).to_le_bytes());
+            assert!(decode(&wrong_length, material).is_err());
+            let mut overlap = file.clone();
+            overlap[10..14].copy_from_slice(&u32::MAX.to_le_bytes());
+            assert!(decode(&overlap, material).is_err());
+            let mut bad_padding = file;
+            bad_padding[15] ^= 1;
+            assert!(decode(&bad_padding, material).is_err());
+        }
     }
 }

@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod content;
 pub mod meta;
 pub mod query;
 pub mod server;
@@ -29,15 +30,8 @@ fn is_biz_msg_db_key(rel_key: &str) -> bool {
         && !rel_key.contains("_resource")
 }
 
-fn collect_db_keys(
-    all_keys: &HashMap<String, String>,
-    predicate: fn(&str) -> bool,
-) -> Vec<String> {
-    let mut keys: Vec<String> = all_keys
-        .keys()
-        .filter(|k| predicate(k))
-        .cloned()
-        .collect();
+fn collect_db_keys(all_keys: &HashMap<String, String>, predicate: fn(&str) -> bool) -> Vec<String> {
+    let mut keys: Vec<String> = all_keys.keys().filter(|k| predicate(k)).cloned().collect();
     keys.sort();
     keys
 }
@@ -75,7 +69,7 @@ async fn async_run() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("读取密钥文件 {:?} 失败: {}", cfg.keys_file, e))?;
     let keys_raw: serde_json::Value = serde_json::from_str(&keys_content)?;
-    let all_keys = extract_keys(&keys_raw);
+    let all_keys = load_keys(&keys_raw, &cfg.db_dir)?;
     eprintln!("[daemon] 密钥数量: {}", all_keys.len());
 
     // 初始化 DbCache
@@ -115,6 +109,71 @@ async fn async_run() -> Result<()> {
     cleanup_ipc_files();
     serve_result?;
 
+    Ok(())
+}
+
+/// Load legacy maps or a schema-v1 vault, validating every supplied key against
+/// its exact source database. No key material is included in diagnostic errors.
+pub(crate) fn load_keys(
+    json: &serde_json::Value,
+    db_dir: &std::path::Path,
+) -> Result<HashMap<String, String>> {
+    let mut result = HashMap::new();
+    if json.get("schema_version").is_some() {
+        anyhow::ensure!(json["schema_version"] == 1, "unsupported key vault schema");
+        let entries = json["databases"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("missing vault databases"))?;
+        for entry in entries {
+            let rel = entry["database"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing database path"))?;
+            let hex = entry["raw_key_hex"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing database key"))?;
+            let salt = entry["salt_hex"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing database salt"))?;
+            validate_rel_path(rel)?;
+            anyhow::ensure!(
+                salt.len() == 32 && salt.bytes().all(|b| b.is_ascii_hexdigit()),
+                "invalid salt encoding"
+            );
+            let salt: Vec<u8> = (0..32)
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&salt[i..i + 2], 16))
+                .collect::<std::result::Result<_, _>>()?;
+            let key = cache::hex_to_32bytes(hex)?;
+            crate::crypto::verify_database_key(&db_dir.join(rel), &key, Some(&salt))?;
+            anyhow::ensure!(
+                result.insert(rel.to_owned(), hex.to_owned()).is_none(),
+                "duplicate vault database"
+            );
+        }
+    } else {
+        result = extract_keys(json);
+        for (rel, hex) in &result {
+            validate_rel_path(rel)?;
+            crate::crypto::verify_database_key(
+                &db_dir.join(rel),
+                &cache::hex_to_32bytes(hex)?,
+                None,
+            )?;
+        }
+    }
+    anyhow::ensure!(!result.is_empty(), "no usable database keys");
+    Ok(result)
+}
+
+fn validate_rel_path(rel: &str) -> Result<()> {
+    anyhow::ensure!(
+        !rel.contains('\\')
+            && rel.ends_with(".db")
+            && std::path::Path::new(rel)
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_))),
+        "invalid database relative path"
+    );
     Ok(())
 }
 

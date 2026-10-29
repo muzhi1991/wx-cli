@@ -400,6 +400,14 @@ fn terminate_pid_unix(pid: u32) -> Result<()> {
 
 #[cfg(unix)]
 fn unix_process_exists(pid: u32) -> bool {
+    // A container PID 1 may not reap an exited daemon promptly. Zombies have
+    // already released their socket and must not make stop time out.
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        if linux_process_exited(&stat) {
+            return false;
+        }
+    }
     let rc = unsafe { libc::kill(pid as i32, 0) };
     if rc == 0 {
         return true;
@@ -489,4 +497,19 @@ fn send_windows(req: Request) -> Result<Response> {
     }
 
     Ok(resp)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_exited(stat: &str) -> bool {
+    stat.rsplit_once(')')
+        .and_then(|(_, tail)| tail.split_whitespace().next())
+        .is_some_and(|state| matches!(state, "Z" | "X"))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn exited_daemon_state_handles_parentheses_in_process_name() {
+    assert!(linux_process_exited("123 (wx (daemon)) Z 1 2 3"));
+    assert!(!linux_process_exited("123 (wx (daemon)) S 1 2 3"));
+    assert!(!linux_process_exited("unreadable"));
 }

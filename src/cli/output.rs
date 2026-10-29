@@ -29,10 +29,13 @@ pub fn resolve(json: bool) -> Fmt {
 }
 
 pub fn print_value(value: &serde_json::Value, fmt: &Fmt) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
     match fmt {
-        Fmt::Json => println!("{}", serde_json::to_string_pretty(value)?),
-        Fmt::Yaml => print!("{}", serde_yaml::to_string(value)?),
+        Fmt::Json => writeln!(out, "{}", serde_json::to_string_pretty(value)?)?,
+        Fmt::Yaml => write!(out, "{}", serde_yaml::to_string(value)?)?,
     }
+
     Ok(())
 }
 

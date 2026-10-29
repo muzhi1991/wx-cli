@@ -20,6 +20,7 @@ pub enum AttachmentKind {
     Video,
     File,
     Voice,
+    Sticker,
 }
 
 impl AttachmentKind {
@@ -31,6 +32,7 @@ impl AttachmentKind {
             3 => Some(AttachmentKind::Image),
             34 => Some(AttachmentKind::Voice),
             43 => Some(AttachmentKind::Video),
+            47 => Some(AttachmentKind::Sticker),
             // type=49 是 appmsg，里面 subtype=6 才是文件；这里偏宽松返回 File，
             // 由 resolver 进一步根据 appmsg subtype 决定是否真的能 extract
             49 => Some(AttachmentKind::File),
@@ -44,6 +46,7 @@ impl AttachmentKind {
             AttachmentKind::Video => "video",
             AttachmentKind::File => "file",
             AttachmentKind::Voice => "voice",
+            AttachmentKind::Sticker => "sticker",
         }
     }
 }
